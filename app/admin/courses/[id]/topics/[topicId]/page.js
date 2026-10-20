@@ -136,7 +136,7 @@ export default function TopicDetailPage() {
   const [language, setLanguage] = useState("en");
   const [activeTab, setActiveTab] = useState("learn");
   const [mcqs, setMcqs] = useState([]);
-  const [generating, setGenerating] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [mcqPage, setMcqPage] = useState(0);
   const PAGE_SIZE = 10;
@@ -154,29 +154,41 @@ export default function TopicDetailPage() {
 
   useEffect(load, [topicId]);
 
+  // Generation runs in the background on the server; poll until it finishes.
+  const serverGenerating = topic?.content_status === "generating";
+  useEffect(() => {
+    if (!serverGenerating) return;
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverGenerating, topicId]);
+
   async function handleGenerate({ force = false } = {}) {
     if (isGenerated && !force) return;
-    setGenerating(true);
+    setStarting(true);
     setError("");
     try {
       const res = await fetch(`/api/admin/topics/${topicId}/generate-content`, { method: "POST" });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.error || "Could not generate content");
+        setError(data.error || `Could not start generation (HTTP ${res.status})`);
         return;
       }
       setMcqPage(0);
-      load();
+      // Show "generating" right away; polling picks up the result.
+      setTopic((t) => (t ? { ...t, content_status: "generating", generation_error: null } : t));
     } catch {
-      setError("Network error while generating content. This can take a couple of minutes for 100 MCQs — please wait and retry if it timed out.");
+      setError("Could not reach the server. Check your internet connection and try again.");
     } finally {
-      setGenerating(false);
+      setStarting(false);
     }
   }
 
   if (!topic) return <p className="text-slate-400 text-sm">Loading…</p>;
 
   const isGenerated = topic.content_status === "ready";
+  const generating = starting || serverGenerating;
+  const failedReason = topic.content_status === "failed" ? topic.generation_error || "Generation failed." : "";
   const pagedMcqs = mcqs.slice(mcqPage * PAGE_SIZE, mcqPage * PAGE_SIZE + PAGE_SIZE);
   const totalPages = Math.ceil(mcqs.length / PAGE_SIZE);
 
@@ -219,10 +231,18 @@ export default function TopicDetailPage() {
       {error && (
         <div className="bg-red-50 text-red-600 text-sm font-medium rounded-xl px-4 py-3 mb-4">{error}</div>
       )}
+      {!error && failedReason && !generating && (
+        <div className="bg-red-50 text-red-600 text-sm font-medium rounded-xl px-4 py-3 mb-4">
+          Last generation failed: {failedReason} — click the button to try again.
+        </div>
+      )}
       {generating && (
-        <div className="bg-amber-50 text-amber-700 text-sm font-medium rounded-xl px-4 py-3 mb-4">
-          Generating reading material and 100 MCQs via OpenAI — this runs as several requests and can take 1–3
-          minutes. Please don&apos;t close this tab.
+        <div className="bg-amber-50 text-amber-700 text-sm font-medium rounded-xl px-4 py-3 mb-4 flex items-center gap-3">
+          <span className="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+          <span>
+            Generating reading material and 100 MCQs in the background — usually 3–6 minutes. You can leave this
+            page; it updates automatically when done.
+          </span>
         </div>
       )}
 

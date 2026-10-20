@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { after } from "next/server";
 import { getAuthFromCookieStore } from "@/lib/auth";
 import { query, queryOne } from "@/lib/db";
 import {
@@ -8,11 +9,17 @@ import {
   translateMcqBatchToHindi,
 } from "@/lib/openai";
 
-export const maxDuration = 300;
+// Generation (notes in 2 languages + 100 MCQs + Hindi translation) takes several
+// minutes — far longer than nginx's 60s proxy timeout. So POST only starts the
+// job and returns at once; the work runs in `after()` and the admin page polls
+// GET /api/admin/topics/[topicId] until content_status is 'ready' or 'failed'.
+export const maxDuration = 900;
 
 const TOTAL_MCQS = 100;
 const BATCH_SIZE = 20;
 const BATCH_LABELS = ["easy-to-moderate", "moderate", "moderate-to-hard", "hard", "mixed exam-style"];
+// A job "generating" for longer than this is assumed dead (e.g. server restart).
+const STALE_MINUTES = 20;
 
 export async function POST(request, { params }) {
   const admin = await getAuthFromCookieStore(await cookies(), "admin");
@@ -20,10 +27,16 @@ export async function POST(request, { params }) {
 
   const { topicId } = await params;
   const topic = await queryOne(
-    `SELECT t.*, c.title AS course_title FROM topics t JOIN courses c ON c.id = t.course_id WHERE t.id = ?`,
+    `SELECT t.*, c.title AS course_title,
+       (t.generation_started_at > NOW() - INTERVAL ${STALE_MINUTES} MINUTE) AS recently_started
+     FROM topics t JOIN courses c ON c.id = t.course_id WHERE t.id = ?`,
     [topicId]
   );
   if (!topic) return Response.json({ error: "Topic not found" }, { status: 404 });
+
+  if (topic.content_status === "generating" && topic.recently_started) {
+    return Response.json({ ok: true, status: "generating", already_running: true }, { status: 202 });
+  }
 
   const { apiKey, model } = await getOpenAIConfig();
   if (!apiKey) {
@@ -33,8 +46,17 @@ export async function POST(request, { params }) {
     );
   }
 
-  await query("UPDATE topics SET content_status = 'generating' WHERE id = ?", [topicId]);
+  await query(
+    "UPDATE topics SET content_status = 'generating', generation_error = NULL, generation_started_at = NOW() WHERE id = ?",
+    [topicId]
+  );
 
+  after(() => runGeneration({ topicId, topic, apiKey, model }));
+
+  return Response.json({ ok: true, status: "generating" }, { status: 202 });
+}
+
+async function runGeneration({ topicId, topic, apiKey, model }) {
   try {
     const [contentEn, contentHi] = await Promise.all([
       generateTopicStructuredContent({
@@ -126,11 +148,16 @@ export async function POST(request, { params }) {
       );
     }
 
-    await query("UPDATE topics SET content_status = 'ready' WHERE id = ?", [topicId]);
+    await query(
+      "UPDATE topics SET content_status = 'ready', generation_error = NULL WHERE id = ?",
+      [topicId]
+    );
 
-    return Response.json({ ok: true, mcq_count: allMcqs.length });
   } catch (err) {
-    await query("UPDATE topics SET content_status = 'failed' WHERE id = ?", [topicId]);
-    return Response.json({ error: err.message }, { status: 502 });
+    console.error(`AI generation failed for topic ${topicId}:`, err);
+    await query("UPDATE topics SET content_status = 'failed', generation_error = ? WHERE id = ?", [
+      String(err?.message || err).slice(0, 500),
+      topicId,
+    ]).catch(() => {});
   }
 }

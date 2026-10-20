@@ -239,6 +239,13 @@ async function main() {
     console.log("payment_orders now kept (user_id set NULL) when a user is deleted");
   }
 
+  // AI generation now runs in the background; the admin page polls status.
+  if (!(await columnExists(conn, "topics", "generation_error"))) {
+    await conn.execute(`ALTER TABLE topics ADD COLUMN generation_error VARCHAR(500) NULL AFTER content_status`);
+    await conn.execute(`ALTER TABLE topics ADD COLUMN generation_started_at DATETIME NULL AFTER generation_error`);
+    console.log("Added topics.generation_error, topics.generation_started_at");
+  }
+
   console.log("Migration complete.");
   await conn.end();
 }

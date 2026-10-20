@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS topics (
   slug VARCHAR(255) NOT NULL,
   sort_order INT NOT NULL DEFAULT 0,
   content_status ENUM('pending','generating','ready','failed') NOT NULL DEFAULT 'pending',
+  generation_error VARCHAR(500) NULL,
+  generation_started_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uniq_course_slug (course_id, slug),
